@@ -445,6 +445,40 @@ CTL_DECLARE(add_bridges);
 #define del_bridges_ARGS (int *br_array)
 CTL_DECLARE(del_bridges);
 
+/* (re-)load the persistent JSON configuration */
+#define CMD_CODE_reapply_config    124
+#define CONFIG_PATH_LEN 256
+#define reapply_config_ARGS (const char *path)
+struct reapply_config_IN
+{
+    char path[CONFIG_PATH_LEN];
+};
+struct reapply_config_OUT
+{
+};
+#define reapply_config_COPY_IN ({                                   \
+    strncpy(in->path, path, sizeof(in->path) - 1);                \
+    in->path[sizeof(in->path) - 1] = '\0'; })
+#define reapply_config_COPY_OUT ({ (void)0; })
+#define reapply_config_CALL (in->path)
+CTL_DECLARE(reapply_config);
+
+#define CMD_CODE_reload_config    125
+#define reload_config_ARGS (const char *path)
+struct reload_config_IN
+{
+    char path[CONFIG_PATH_LEN];
+};
+struct reload_config_OUT
+{
+};
+#define reload_config_COPY_IN ({                               \
+    strncpy(in->path, path, sizeof(in->path) - 1);               \
+    in->path[sizeof(in->path) - 1] = '\0'; })
+#define reload_config_COPY_OUT ({ (void)0; })
+#define reload_config_CALL (in->path)
+CTL_DECLARE(reload_config);
+
 /* General case part in ctl command server switch */
 #define SERVER_MESSAGE_CASE(name)                            \
     case CMD_CODE_ ## name : do                              \

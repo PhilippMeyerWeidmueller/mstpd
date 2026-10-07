@@ -13,6 +13,20 @@ enable user-space STP, configure "brctl stp <bridge> on" or
 "ip link set <bridge> type bridge stp_state 1" while ensuring that
 /sbin/bridge-stp kernel helper script will return success (0) for
 this operation.
+.PP
+.B mstpctl reapply [<config-file>]
+loads the persistent JSON configuration and applies it to all active
+bridges and ports. The loaded configuration is also used for bridges
+and ports created later.
+.PP
+.B mstpctl reload [<config-file>]
+loads the persistent JSON configuration without changing existing bridges
+or ports. The loaded configuration is used for bridges and ports created
+later, including new ports added to existing bridges.
+.PP
+For both commands, without <config-file>, mstpd uses the first readable
+file of /etc/mstpd/config.json and /usr/lib/mstpd/config.json. If no
+file is found or the file is invalid, the current configuration is kept.
 
 .SH SPANNING TREE PROTOCOL CONFIGURATION
 

@@ -43,6 +43,8 @@ LT_INIT
 
 PKG_PROG_PKG_CONFIG
 
+PKG_CHECK_MODULES([CJSON], [libcjson])
+
 # Optional building of examples
 AC_ARG_ENABLE([devel],
 	[AC_HELP_STRING([--enable-devel], [build devel mode])])

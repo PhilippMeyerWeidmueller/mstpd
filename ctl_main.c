@@ -1741,6 +1741,28 @@ static int cmd_debuglevel(int argc, char *const *argv)
     return CTL_set_debug_level(getuint(argv[1]));
 }
 
+static int cmd_config(int argc, char *const *argv)
+{
+    char resolved[PATH_MAX] = "";
+    if(argc > 1) {
+        if(!realpath(argv[1], resolved))
+        {
+            fprintf(stderr, "Can't resolve path %s: %s\n", argv[1],
+                    strerror(errno));
+            return -1;
+        }
+        if(strlen(resolved) >= CONFIG_PATH_LEN)
+        {
+            fprintf(stderr, "Path %s is too long (max %d characters)\n",
+                    resolved, CONFIG_PATH_LEN - 1);
+            return -1;
+        }
+    }
+    if(0 == strcmp(argv[0], "reload"))
+        return CTL_reload_config(resolved);
+    return CTL_reapply_config(resolved);
+}
+
 static int do_showmstilist_fmt_plain(const char *br_name,
                                      int num_mstis,
                                      const __u16 *mstids)
@@ -2282,6 +2304,10 @@ static const struct command commands[] =
 
     /* Other */
     {1, 0, "debuglevel", cmd_debuglevel, "<level>", "Level of verbosity"},
+    {0, 1, "reapply", cmd_config, "[<config-file>]",
+     "Load persistent JSON configuration, applied also to active bridges"},
+    {0, 1, "reload", cmd_config, "[<config-file>]",
+     "Load persistent JSON configuration for future bridges and ports only"},
 };
 
 static const struct command *command_lookup(const char *cmd)
@@ -2569,6 +2595,8 @@ CLIENT_SIDE_FUNCTION(set_vid2fid)
 CLIENT_SIDE_FUNCTION(set_fid2mstid)
 CLIENT_SIDE_FUNCTION(set_vids2fids)
 CLIENT_SIDE_FUNCTION(set_fids2mstids)
+CLIENT_SIDE_FUNCTION(reapply_config)
+CLIENT_SIDE_FUNCTION(reload_config)
 
 CTL_DECLARE(add_bridges)
 {

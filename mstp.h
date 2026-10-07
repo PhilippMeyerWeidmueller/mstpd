@@ -661,6 +661,19 @@ typedef struct
     bool set_bridge_ageing_time;
 } CIST_BridgeConfig;
 
+typedef struct
+{
+    CIST_BridgeConfig cist_cfg;
+    __u8 bridge_priority;
+    __u16 mst_config_id_revision;
+    __u8 mst_config_id_name[CONFIGURATION_NAME_LEN];
+    __u16 vid2fid[MAX_VID + 1];
+    __u16 fid2mstid[MAX_FID + 1];
+} MSTP_BridgeDefaultConfig;
+
+void MSTP_IN_get_bridge_default_config(MSTP_BridgeDefaultConfig *cfg,
+                                       const __u8 *macaddr);
+
 int MSTP_IN_set_cist_bridge_config(bridge_t *br, CIST_BridgeConfig *cfg);
 
 /* 12.8.1.4 Set MSTI Bridge Protocol Parameters */
@@ -792,6 +805,14 @@ typedef struct
     __u8 port_priority;
     bool set_port_priority;
 } MSTI_PortConfig;
+
+typedef struct
+{
+    CIST_PortConfig cist_cfg;
+    MSTI_PortConfig msti_cfg;
+} MSTP_PortDefaultConfig;
+
+void MSTP_IN_get_port_default_config(MSTP_PortDefaultConfig *cfg);
 
 int MSTP_IN_set_msti_port_config(per_tree_port_t *ptp, MSTI_PortConfig *cfg);
 

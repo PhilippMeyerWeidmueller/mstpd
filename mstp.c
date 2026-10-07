@@ -43,6 +43,8 @@
 #include "log.h"
 #include "clock_gettime.h"
 
+#define DEFAULT_BRIDGE_PRIORITY 8u
+
 static void PTSM_tick(port_t *prt);
 static bool TCSM_run(per_tree_port_t *ptp, bool dry_run);
 static void BDSM_begin(port_t *prt);
@@ -180,8 +182,8 @@ static tree_t * create_tree(bridge_t *br, __u8 *macaddr, __be16 MSTID)
     INIT_LIST_HEAD(&tree->ports);
 
     memcpy(tree->BridgeIdentifier.s.mac_address, macaddr, ETH_ALEN);
-    /* 0x8000 = default bridge priority (17.14 of 802.1D) */
-    tree->BridgeIdentifier.s.priority = __constant_cpu_to_be16(0x8000) | MSTID;
+    tree->BridgeIdentifier.s.priority =
+        __constant_cpu_to_be16(DEFAULT_BRIDGE_PRIORITY << 12) | MSTID;
     assign(tree->BridgePriority.RootID, tree->BridgeIdentifier);
     assign(tree->BridgePriority.RRootID, tree->BridgeIdentifier);
     assign(tree->BridgePriority.DesignatedBridgeID, tree->BridgeIdentifier);
@@ -210,11 +212,16 @@ static per_tree_port_t * create_ptp(tree_t *tree, port_t *prt)
     ptp->tree = tree;
     ptp->MSTID = tree->MSTID;
 
+    MSTP_PortDefaultConfig defaults;
+    MSTP_IN_get_port_default_config(&defaults);
     ptp->state = BR_STATE_DISABLED;
     /* 0x80 = default port priority (17.14 of 802.1D) */
-    ptp->portId = __constant_cpu_to_be16(0x8000) | prt->port_number;
-    assign(ptp->AdminInternalPortPathCost, 0u);
-    assign(ptp->InternalPortPathCost, compute_pcost(GET_PORT_SPEED(prt)));
+    ptp->portId = __cpu_to_be16(defaults.msti_cfg.port_priority << 12)
+        | prt->port_number;
+    assign(ptp->AdminInternalPortPathCost,
+        defaults.msti_cfg.admin_internal_port_path_cost);
+    assign(ptp->InternalPortPathCost, ptp->AdminInternalPortPathCost ?
+        ptp->AdminInternalPortPathCost : compute_pcost(GET_PORT_SPEED(prt)));
     /* 802.1Q leaves portPriority and portTimes uninitialized */
     assign(ptp->portPriority, tree->BridgePriority);
     assign(ptp->portTimes, tree->BridgeTimes);
@@ -228,31 +235,65 @@ static per_tree_port_t * create_ptp(tree_t *tree, port_t *prt)
 
 /* External events */
 
+void MSTP_IN_get_bridge_default_config(MSTP_BridgeDefaultConfig *cfg,
+                                       const __u8 *macaddr)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->cist_cfg = (CIST_BridgeConfig) {
+        .bridge_max_age = 20,
+        .set_bridge_max_age = true,
+        .bridge_forward_delay = 15,
+        .set_bridge_forward_delay = true,
+        .protocol_version = protoRSTP,
+        .set_protocol_version = true,
+        .tx_hold_count = 6,
+        .set_tx_hold_count = true,
+        .max_hops = 20,
+        .set_max_hops = true,
+        .bridge_hello_time = 2,
+        .set_bridge_hello_time = true,
+        .bridge_ageing_time = 300,
+        .set_bridge_ageing_time = true
+    };
+    cfg->bridge_priority = DEFAULT_BRIDGE_PRIORITY;
+    snprintf((char *)cfg->mst_config_id_name, sizeof(cfg->mst_config_id_name),
+             "%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX",
+             macaddr[0], macaddr[1], macaddr[2],
+             macaddr[3], macaddr[4], macaddr[5]);
+}
+
 bool MSTP_IN_bridge_create(bridge_t *br, __u8 *macaddr)
 {
     tree_t *cist;
+    MSTP_BridgeDefaultConfig *defaults = malloc(sizeof(*defaults));
+    if(!defaults)
+    {
+        ERROR_BRNAME(br, "Out of memory");
+        return false;
+    }
+    MSTP_IN_get_bridge_default_config(defaults, macaddr);
 
     /* Initialize all fields except sysdeps and anchor */
     INIT_LIST_HEAD(&br->ports);
     INIT_LIST_HEAD(&br->trees);
     br->bridgeEnabled = false;
-    memset(br->vid2fid, 0, sizeof(br->vid2fid));
-    memset(br->fid2mstid, 0, sizeof(br->fid2mstid));
+    memcpy(br->vid2fid, defaults->vid2fid, sizeof(br->vid2fid));
+    memcpy(br->fid2mstid, defaults->fid2mstid, sizeof(br->fid2mstid));
     assign(br->MstConfigId.s.selector, (__u8)0);
-    sprintf((char *)br->MstConfigId.s.configuration_name,
-            "%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX",
-            macaddr[0], macaddr[1], macaddr[2],
-            macaddr[3], macaddr[4], macaddr[5]);
-    assign(br->MstConfigId.s.revision_level, __constant_cpu_to_be16(0));
+    memcpy(br->MstConfigId.s.configuration_name, defaults->mst_config_id_name,
+           sizeof(br->MstConfigId.s.configuration_name));
+    assign(br->MstConfigId.s.revision_level,
+           __cpu_to_be16(defaults->mst_config_id_revision));
     RecalcConfigDigest(br); /* set br->MstConfigId.s.configuration_digest */
-    br->ForceProtocolVersion = protoRSTP;
-    assign(br->MaxHops, (__u8)20);       /* 13.37.3 */
-    assign(br->Forward_Delay, (__u8)15); /* 17.14 of 802.1D */
-    assign(br->Max_Age, (__u8)20);       /* 17.14 of 802.1D */
-    assign(br->Transmit_Hold_Count, 6u); /* 17.14 of 802.1D */
+    br->ForceProtocolVersion = defaults->cist_cfg.protocol_version;
+    assign(br->MaxHops, defaults->cist_cfg.max_hops);
+    assign(br->Forward_Delay, defaults->cist_cfg.bridge_forward_delay);
+    assign(br->Max_Age, defaults->cist_cfg.bridge_max_age);
+    assign(br->Transmit_Hold_Count, defaults->cist_cfg.tx_hold_count);
     assign(br->Migrate_Time, 3u); /* 17.14 of 802.1D */
-    assign(br->Ageing_Time, 300u);/* 8.8.3 Table 8-3 */
-    assign(br->Hello_Time, (__u8)2);     /* 17.14 of 802.1D */
+    assign(br->Ageing_Time, defaults->cist_cfg.bridge_ageing_time);
+    assign(br->Hello_Time, defaults->cist_cfg.bridge_hello_time);
+    free(defaults);
 
     bridge_default_internal_vars(br);
 
@@ -264,34 +305,71 @@ bool MSTP_IN_bridge_create(bridge_t *br, __u8 *macaddr)
     return true;
 }
 
+void MSTP_IN_get_port_default_config(MSTP_PortDefaultConfig *cfg)
+{
+    *cfg = (MSTP_PortDefaultConfig) {
+        .cist_cfg = {
+            .admin_external_port_path_cost = 0,
+            .set_admin_external_port_path_cost = true,
+            .admin_edge_port = false,
+            .set_admin_edge_port = true,
+            .auto_edge_port = true,
+            .set_auto_edge_port = true,
+            .admin_p2p = p2pAuto,
+            .set_admin_p2p = true,
+            .restricted_role = false,
+            .set_restricted_role = true,
+            .restricted_tcn = false,
+            .set_restricted_tcn = true,
+            .bpdu_guard_port = false,
+            .set_bpdu_guard_port = true,
+            .network_port = false,
+            .set_network_port = true,
+            .dont_txmt = false,
+            .set_dont_txmt = true,
+            .bpdu_filter_port = false,
+            .set_bpdu_filter_port = true
+        },
+        .msti_cfg = {
+            .admin_internal_port_path_cost = 0,
+            .set_admin_internal_port_path_cost = true,
+            .port_priority = 8,
+            .set_port_priority = true
+        }
+    };
+}
+
 bool MSTP_IN_port_create_and_add_tail(port_t *prt, __u16 portno)
 {
     tree_t *tree;
     per_tree_port_t *ptp, *nxt;
     bridge_t *br = prt->bridge;
+    MSTP_PortDefaultConfig defaults;
+    MSTP_IN_get_port_default_config(&defaults);
 
     /* Initialize all fields except sysdeps and bridge */
     INIT_LIST_HEAD(&prt->trees);
     prt->port_number = __cpu_to_be16(portno);
 
-    assign(prt->AdminExternalPortPathCost, 0u);
+        assign(prt->AdminExternalPortPathCost,
+            defaults.cist_cfg.admin_external_port_path_cost);
     /* Default for operP2P is false because by default AdminP2P
      * says to auto-detect p2p state, and it is derived from duplex
      * and initially port is in down state and in this down state
      * duplex is set to false (half) */
-    prt->AdminP2P = p2pAuto;
+    prt->AdminP2P = defaults.cist_cfg.admin_p2p;
     prt->operPointToPointMAC = false;
     prt->portEnabled = false;
-    prt->restrictedRole = false; /* 13.25.14 */
-    prt->restrictedTcn = false; /* 13.25.15 */
+    prt->restrictedRole = defaults.cist_cfg.restricted_role; /* 13.25.14 */
+    prt->restrictedTcn = defaults.cist_cfg.restricted_tcn; /* 13.25.15 */
     assign(prt->ExternalPortPathCost, MAX_PATH_COST); /* 13.37.1 */
-    prt->AdminEdgePort = false; /* 13.25 */
-    prt->AutoEdge = true;       /* 13.25 */
-    prt->BpduGuardPort = false;
+    prt->AdminEdgePort = defaults.cist_cfg.admin_edge_port; /* 13.25 */
+    prt->AutoEdge = defaults.cist_cfg.auto_edge_port;       /* 13.25 */
+    prt->BpduGuardPort = defaults.cist_cfg.bpdu_guard_port;
     prt->BpduGuardError = false;
-    prt->NetworkPort = false;
-    prt->dontTxmtBpdu = false;
-    prt->bpduFilterPort = false;
+    prt->NetworkPort = defaults.cist_cfg.network_port;
+    prt->dontTxmtBpdu = defaults.cist_cfg.dont_txmt;
+    prt->bpduFilterPort = defaults.cist_cfg.bpdu_filter_port;
     prt->deleted = false;
 
     port_default_internal_vars(prt);
@@ -2035,7 +2113,7 @@ static void recordAgreement(per_tree_port_t *ptp)
     }
     /* MSTI */
     cist = GET_CIST_PTP_FROM_PORT(prt);
-    if(prt->operPointToPointMAC 
+    if(prt->operPointToPointMAC
        && cmp(b->cistRootID, ==, cist->portPriority.RootID)
        && cmp(b->cistExtRootPathCost, ==, cist->portPriority.ExtRootPathCost)
        && cmp(b->cistRRootID, ==, cist->portPriority.RRootID)
