@@ -15,6 +15,7 @@
 
 #include <cjson/cJSON.h>
 
+#include "ctl_socket_server.h"
 #include "persistent_config.h"
 #include "log.h"
 #include "driver.h"
@@ -60,6 +61,17 @@ static void free_config_list(struct list_head *list)
         list_del(&br_cfg->list);
         free_bridge_config(br_cfg);
     }
+}
+
+static void report_config_default(const char *br_name, const char *port_name,
+                                  const char *field)
+{
+    if(port_name)
+        ctl_err_log("Bridge '%s' port '%s': '%s' not set; using default.\n",
+                    br_name, port_name, field);
+    else
+        ctl_err_log("Bridge '%s': '%s' not set; using default.\n",
+                    br_name, field);
 }
 
 typedef enum { FIELD_ABSENT, FIELD_VALID, FIELD_INVALID } field_result_t;
@@ -154,23 +166,24 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
     CIST_BridgeConfig *cfg = &br_cfg->cist_cfg;
     unsigned int u;
 
-    switch(get_json_protocol_version(json, "protocol_version", &cfg->protocol_version))
+    switch(get_json_protocol_version(json, "force-protocol-version", &cfg->protocol_version))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'protocol_version' must be one of "
+            ERROR("Bridge '%s': 'force-protocol-version' must be one of "
                   "\"stp\", \"rstp\", \"mstp\"", name);
             return false;
         case FIELD_VALID:
             cfg->set_protocol_version = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "force-protocol-version");
             break;
     }
 
-    switch(get_json_uint(json, "bridge_priority", UINT8_MAX, &u))
+    switch(get_json_uint(json, "bridge-priority", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'bridge_priority' must be a non-negative integer",
+            ERROR("Bridge '%s': 'bridge-priority' must be a non-negative integer",
                   name);
             return false;
         case FIELD_VALID:
@@ -178,13 +191,14 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
             br_cfg->set_bridge_priority = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "bridge-priority");
             break;
     }
 
-    switch(get_json_uint(json, "bridge_max_age", UINT8_MAX, &u))
+    switch(get_json_uint(json, "bridge-max-age", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'bridge_max_age' must be a non-negative integer",
+            ERROR("Bridge '%s': 'bridge-max-age' must be a non-negative integer",
                   name);
             return false;
         case FIELD_VALID:
@@ -192,13 +206,14 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
             cfg->set_bridge_max_age = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "bridge-max-age");
             break;
     }
 
-    switch(get_json_uint(json, "bridge_forward_delay", UINT8_MAX, &u))
+    switch(get_json_uint(json, "bridge-forward-delay", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'bridge_forward_delay' must be a "
+            ERROR("Bridge '%s': 'bridge-forward-delay' must be a "
                 "non-negative integer", name);
             return false;
         case FIELD_VALID:
@@ -206,13 +221,29 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
             cfg->set_bridge_forward_delay = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "bridge-forward-delay");
             break;
     }
 
-    switch(get_json_uint(json, "tx_hold_count", UINT_MAX, &u))
+    switch(get_json_uint(json, "hello-time", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'tx_hold_count' must be a non-negative integer",
+            ERROR("Bridge '%s': 'hello-time' must be a non-negative integer",
+                  name);
+            return false;
+        case FIELD_VALID:
+            cfg->bridge_hello_time = u;
+            cfg->set_bridge_hello_time = true;
+            break;
+        case FIELD_ABSENT:
+            report_config_default(name, NULL, "hello-time");
+            break;
+    }
+
+    switch(get_json_uint(json, "tx-hold-count", UINT_MAX, &u))
+    {
+        case FIELD_INVALID:
+            ERROR("Bridge '%s': 'tx-hold-count' must be a non-negative integer",
                   name);
             return false;
         case FIELD_VALID:
@@ -220,13 +251,14 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
             cfg->set_tx_hold_count = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "tx-hold-count");
             break;
     }
 
-    switch(get_json_uint(json, "bridge_ageing_time", UINT_MAX, &u))
+    switch(get_json_uint(json, "ageing-time", UINT_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'bridge_ageing_time' must be a "
+            ERROR("Bridge '%s': 'ageing-time' must be a "
                 "non-negative integer", name);
             return false;
         case FIELD_VALID:
@@ -234,6 +266,7 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
             cfg->set_bridge_ageing_time = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "ageing-time");
             break;
     }
 
@@ -292,7 +325,10 @@ static bool parse_vid2fid(const char *name, cJSON *mstp_json,
 {
     cJSON *list_json = cJSON_GetObjectItemCaseSensitive(mstp_json, "vid2fid");
     if(!list_json)
+    {
+        report_config_default(name, NULL, "mstp.vid2fid");
         return true;
+    }
     if(!cJSON_IsArray(list_json))
     {
         ERROR("Bridge '%s': 'mstp.vid2fid' must be an array", name);
@@ -322,7 +358,10 @@ static bool parse_fid2mstid(const char *name, cJSON *mstp_json,
 {
     cJSON *list_json = cJSON_GetObjectItemCaseSensitive(mstp_json, "fid2mstid");
     if(!list_json)
+    {
+        report_config_default(name, NULL, "mstp.fid2mstid");
         return true;
+    }
     if(!cJSON_IsArray(list_json))
     {
         ERROR("Bridge '%s': 'mstp.fid2mstid' must be an array", name);
@@ -351,14 +390,17 @@ static bool parse_fid2mstid(const char *name, cJSON *mstp_json,
 static bool parse_mst_config_id(const char *name, cJSON *mstp_json,
                                 stored_bridge_cfg_t *br_cfg)
 {
-    cJSON *cfg_json = cJSON_GetObjectItemCaseSensitive(mstp_json, "mst_config_id");
+    cJSON *cfg_json = cJSON_GetObjectItemCaseSensitive(mstp_json, "mst-config-id");
     if(!cfg_json)
+    {
+        report_config_default(name, NULL, "mstp.mst-config-id");
         return true;
+    }
 
-    cJSON *name_json = cJSON_GetObjectItemCaseSensitive(cfg_json, "name");
+    cJSON *name_json = cJSON_GetObjectItemCaseSensitive(cfg_json, "configuration-name");
     if(!cJSON_IsObject(cfg_json) || !name_json || !cJSON_IsString(name_json))
     {
-        ERROR("Bridge '%s': 'mstp.mst_config_id.name' must be a string",
+        ERROR("Bridge '%s': 'mstp.mst-config-id.configuration-name' must be a string",
               name);
         return false;
     }
@@ -372,14 +414,16 @@ static bool parse_mst_config_id(const char *name, cJSON *mstp_json,
     memcpy(br_cfg->mst_config_id_name, cfg_name, cfg_name_len);
 
     unsigned int revision = 0;
-    switch(get_json_uint(cfg_json, "revision", UINT16_MAX, &revision))
+    switch(get_json_uint(cfg_json, "revision-level", UINT16_MAX, &revision))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'mstp.mst_config_id.revision' must be an "
+            ERROR("Bridge '%s': 'mstp.mst-config-id.revision-level' must be an "
                   "non-negative integer", name);
             return false;
         case FIELD_VALID:
+            break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "mstp.mst-config-id.revision-level");
             break;
     }
     br_cfg->mst_config_id_revision = revision;
@@ -427,11 +471,19 @@ static bool parse_msti_list(const char *name, cJSON *mstp_json,
         unsigned int priority = default_priority;
         if(!cJSON_IsObject(value)
             || FIELD_INVALID ==
-                get_json_uint(value, "bridge_priority", UINT8_MAX, &priority))
+                get_json_uint(value, "bridge-priority", UINT8_MAX, &priority))
         {
             ERROR("Bridge '%s': 'mstp.msti.%s' must be an object with an "
-                "optional non-negative integer 'bridge_priority'", name, key);
+                "optional non-negative integer 'bridge-priority'", name, key);
             return false;
+        }
+
+        if(!cJSON_GetObjectItemCaseSensitive(value, "bridge-priority"))
+        {
+            char field[64];
+            snprintf(field, sizeof(field), "mstp.msti.%ld.bridge-priority",
+                     mstid);
+            report_config_default(name, NULL, field);
         }
 
         stored_msti_bridge_cfg_t *msti_cfg = calloc(1, sizeof(*msti_cfg));
@@ -453,7 +505,13 @@ static bool parse_mstp_bridge_config(const char *name, cJSON *json,
 {
     cJSON *mstp_json = cJSON_GetObjectItemCaseSensitive(json, "mstp");
     if(!mstp_json)
+    {
+        report_config_default(name, NULL, "mstp.max-hops");
+        report_config_default(name, NULL, "mstp.mst-config-id");
+        report_config_default(name, NULL, "mstp.vid2fid");
+        report_config_default(name, NULL, "mstp.fid2mstid");
         return true;
+    }
     if(!cJSON_IsObject(mstp_json))
     {
         ERROR("Bridge '%s': 'mstp' must be an object", name);
@@ -461,10 +519,10 @@ static bool parse_mstp_bridge_config(const char *name, cJSON *json,
     }
 
     unsigned int u;
-    switch(get_json_uint(mstp_json, "max_hops", UINT8_MAX, &u))
+    switch(get_json_uint(mstp_json, "max-hops", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s': 'mstp.max_hops' must be a non-negative integer",
+            ERROR("Bridge '%s': 'mstp.max-hops' must be a non-negative integer",
                   name);
             return false;
         case FIELD_VALID:
@@ -472,6 +530,7 @@ static bool parse_mstp_bridge_config(const char *name, cJSON *json,
             br_cfg->cist_cfg.set_max_hops = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(name, NULL, "mstp.max-hops");
             break;
     }
 
@@ -497,6 +556,7 @@ static bool set_cist_bool_field(const char *br_name, const char *port_name,
             *set_field = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(br_name, port_name, key);
             break;
     }
     return true;
@@ -508,10 +568,10 @@ static bool parse_cist_port_config(const char *br_name, const char *port_name,
     CIST_PortConfig *cfg = &port_cfg->cist_cfg;
     unsigned int u;
 
-    switch(get_json_uint(json, "port_priority", UINT8_MAX, &u))
+    switch(get_json_uint(json, "port-priority", UINT8_MAX, &u))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s' port '%s': 'port_priority' must be an "
+            ERROR("Bridge '%s' port '%s': 'port-priority' must be an "
                   "non-negative integer", br_name, port_name);
             return false;
         case FIELD_VALID:
@@ -519,15 +579,16 @@ static bool parse_cist_port_config(const char *br_name, const char *port_name,
             port_cfg->set_port_priority = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(br_name, port_name, "port-priority");
             break;
     }
 
-    switch(get_json_uint(json, "admin_external_port_path_cost",
+    switch(get_json_uint(json, "admin-external-cost",
                          UINT32_MAX, &u))
     {
         case FIELD_INVALID:
             ERROR("Bridge '%s' port '%s': "
-                  "'admin_external_port_path_cost' must be a "
+                  "'admin-external-cost' must be a "
                   "non-negative integer", br_name, port_name);
             return false;
         case FIELD_VALID:
@@ -535,42 +596,45 @@ static bool parse_cist_port_config(const char *br_name, const char *port_name,
             cfg->set_admin_external_port_path_cost = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(br_name, port_name,
+                                  "admin-external-cost");
             break;
     }
 
-    switch(get_json_admin_p2p(json, "admin_p2p", &cfg->admin_p2p))
+    switch(get_json_admin_p2p(json, "admin-point-to-point", &cfg->admin_p2p))
     {
         case FIELD_INVALID:
-            ERROR("Bridge '%s' port '%s': 'admin_p2p' must be \"auto\", "
+            ERROR("Bridge '%s' port '%s': 'admin-point-to-point' must be \"auto\", "
                   "\"yes\" or \"no\"", br_name, port_name);
             return false;
         case FIELD_VALID:
             cfg->set_admin_p2p = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(br_name, port_name, "admin-point-to-point");
             break;
     }
 
-    return set_cist_bool_field(br_name, port_name, json, "admin_edge_port",
+    return set_cist_bool_field(br_name, port_name, json, "admin-edge-port",
                                &cfg->admin_edge_port,
                                &cfg->set_admin_edge_port)
-        && set_cist_bool_field(br_name, port_name, json, "auto_edge_port",
+        && set_cist_bool_field(br_name, port_name, json, "auto-edge-port",
                               &cfg->auto_edge_port, &cfg->set_auto_edge_port)
-        && set_cist_bool_field(br_name, port_name, json, "restricted_role",
+        && set_cist_bool_field(br_name, port_name, json, "restricted-role",
                               &cfg->restricted_role,
                               &cfg->set_restricted_role)
-        && set_cist_bool_field(br_name, port_name, json, "restricted_tcn",
+        && set_cist_bool_field(br_name, port_name, json, "restricted-TCN",
                               &cfg->restricted_tcn,
                               &cfg->set_restricted_tcn)
-        && set_cist_bool_field(br_name, port_name, json, "bpdu_guard_port",
+        && set_cist_bool_field(br_name, port_name, json, "bpdu-guard-port",
                               &cfg->bpdu_guard_port,
                               &cfg->set_bpdu_guard_port)
-        && set_cist_bool_field(br_name, port_name, json, "bpdu_filter_port",
+        && set_cist_bool_field(br_name, port_name, json, "bpdu-filter-port",
                               &cfg->bpdu_filter_port,
                               &cfg->set_bpdu_filter_port)
-        && set_cist_bool_field(br_name, port_name, json, "network_port",
+        && set_cist_bool_field(br_name, port_name, json, "network-port",
                               &cfg->network_port, &cfg->set_network_port)
-        && set_cist_bool_field(br_name, port_name, json, "dont_txmt",
+        && set_cist_bool_field(br_name, port_name, json, "dont-txmt",
                               &cfg->dont_txmt, &cfg->set_dont_txmt);
 }
 
@@ -614,11 +678,12 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
         msti_cfg->cfg = defaults.msti_cfg;
 
         unsigned int u;
-        switch(get_json_uint(value, "port_priority", UINT8_MAX, &u))
+        char field[64];
+        switch(get_json_uint(value, "port-priority", UINT8_MAX, &u))
         {
             case FIELD_INVALID:
                 ERROR("Bridge '%s' port '%s': "
-                      "'mstp.msti.%s.port_priority' must be a "
+                      "'mstp.msti.%s.port-priority' must be a "
                       "non-negative integer", br_name, port_name, key);
                 free(msti_cfg);
                 return false;
@@ -627,15 +692,18 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
                 msti_cfg->cfg.set_port_priority = true;
                 break;
             case FIELD_ABSENT:
+                snprintf(field, sizeof(field), "mstp.msti.%ld.port-priority",
+                         mstid);
+                report_config_default(br_name, port_name, field);
                 break;
         }
 
-        switch(get_json_uint(value, "admin_internal_port_path_cost",
+        switch(get_json_uint(value, "admin-internal-cost",
                      UINT32_MAX, &u))
         {
             case FIELD_INVALID:
                 ERROR("Bridge '%s' port '%s': "
-                      "'mstp.msti.%s.admin_internal_port_path_cost' must "
+                      "'mstp.msti.%s.admin-internal-cost' must "
                       "be a non-negative integer", br_name, port_name, key);
                 free(msti_cfg);
                 return false;
@@ -644,6 +712,9 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
                 msti_cfg->cfg.set_admin_internal_port_path_cost = true;
                 break;
             case FIELD_ABSENT:
+                snprintf(field, sizeof(field),
+                         "mstp.msti.%ld.admin-internal-cost", mstid);
+                report_config_default(br_name, port_name, field);
                 break;
         }
 
@@ -658,7 +729,11 @@ static bool parse_mstp_port_config(const char *br_name, const char *port_name,
 {
     cJSON *mstp_json = cJSON_GetObjectItemCaseSensitive(json, "mstp");
     if(!mstp_json)
+    {
+        report_config_default(br_name, port_name,
+                              "mstp.cist-admin-internal-cost");
         return true;
+    }
     if(!cJSON_IsObject(mstp_json))
     {
         ERROR("Bridge '%s' port '%s': 'mstp' must be an object", br_name,
@@ -667,12 +742,12 @@ static bool parse_mstp_port_config(const char *br_name, const char *port_name,
     }
 
     unsigned int u;
-    switch(get_json_uint(mstp_json, "cist_admin_internal_port_path_cost",
+    switch(get_json_uint(mstp_json, "cist-admin-internal-cost",
                          UINT32_MAX, &u))
     {
         case FIELD_INVALID:
             ERROR("Bridge '%s' port '%s': "
-                  "'mstp.cist_admin_internal_port_path_cost' must be an "
+                  "'mstp.cist-admin-internal-cost' must be an "
                   "non-negative integer", br_name, port_name);
             return false;
         case FIELD_VALID:
@@ -680,6 +755,8 @@ static bool parse_mstp_port_config(const char *br_name, const char *port_name,
             port_cfg->set_cist_internal_port_path_cost = true;
             break;
         case FIELD_ABSENT:
+            report_config_default(br_name, port_name,
+                                  "mstp.cist-admin-internal-cost");
             break;
     }
 

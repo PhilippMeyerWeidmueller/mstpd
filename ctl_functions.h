@@ -28,7 +28,7 @@ struct ctl_msg_hdr
     int res;
 };
 
-#define LOG_STRING_LEN 256
+#define LOG_STRING_LEN (64 * 1024)
 
 typedef struct _log_string
 {
