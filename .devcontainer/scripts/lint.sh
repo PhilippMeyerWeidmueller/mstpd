@@ -74,7 +74,8 @@ CFLAGS=(
 	-I. -I"$TMP_DIR"
 )
 read -r -a CJSON_CFLAGS <<<"$(pkg-config --cflags libcjson 2>/dev/null || true)"
-CFLAGS+=("${CJSON_CFLAGS[@]}")
+read -r -a MNL_CFLAGS <<<"$(pkg-config --cflags libmnl 2>/dev/null || true)"
+CFLAGS+=("${CJSON_CFLAGS[@]}" "${MNL_CFLAGS[@]}")
 
 mapfile -t FILES < <({ am_sources mstpd_SOURCES; am_sources mstpctl_SOURCES; } | sort -u)
 

@@ -53,13 +53,15 @@ CFLAGS=(
 
 read -r -a CJSON_CFLAGS <<<"$(pkg-config --cflags libcjson)"
 read -r -a CJSON_LIBS <<<"$(pkg-config --libs libcjson)"
-CFLAGS+=("${CJSON_CFLAGS[@]}")
+read -r -a MNL_CFLAGS <<<"$(pkg-config --cflags libmnl)"
+read -r -a MNL_LIBS <<<"$(pkg-config --libs libmnl)"
+CFLAGS+=("${CJSON_CFLAGS[@]}" "${MNL_CFLAGS[@]}")
 
 mapfile -t MSTPD_SRCS < <(am_sources mstpd_SOURCES)
 mapfile -t MSTPCTL_SRCS < <(am_sources mstpctl_SOURCES)
 
 echo "==> Building mstpd"
-"$CC" "${CFLAGS[@]}" "${MSTPD_SRCS[@]}" -o "$BUILD_DIR/mstpd" "${CJSON_LIBS[@]}" -lm -lrt
+"$CC" "${CFLAGS[@]}" "${MSTPD_SRCS[@]}" -o "$BUILD_DIR/mstpd" "${CJSON_LIBS[@]}" "${MNL_LIBS[@]}" -lm -lrt
 
 echo "==> Building mstpctl"
 "$CC" "${CFLAGS[@]}" "${MSTPCTL_SRCS[@]}" -o "$BUILD_DIR/mstpctl" -lrt
