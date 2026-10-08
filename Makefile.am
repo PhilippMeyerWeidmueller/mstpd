@@ -17,13 +17,12 @@ mstpd_CFLAGS = \
 	-Os -Wall -D_REENTRANT -D__LINUX__ -I. \
 	-D_GNU_SOURCE $(CJSON_CFLAGS)
 
-mstpd_LDADD = $(LIBMNL_LIBS)
+mstpd_LDADD = $(LIBMNL_LIBS) $(CJSON_LIBS) -lm
 
 if ENABLE_DEVEL
   mstpd_CFLAGS += -g3 -O0 -Werror
 endif
 mstpctl_CFLAGS = $(mstpd_CFLAGS)
-mstpd_LDADD = $(CJSON_LIBS) -lm
 
 # unit testing
 LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) $(top_srcdir)/tap-driver.sh
