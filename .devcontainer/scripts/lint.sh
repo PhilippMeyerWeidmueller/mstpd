@@ -1,89 +1,55 @@
 #!/usr/bin/env bash
-# Run clang-tidy over the mstpd and mstpctl sources listed in Makefile.am,
-# focusing on undefined behavior and pointer misuse.
+# Run clang-tidy over the mstpd and mstpctl sources, using the exact compile
+# commands of the autotools build, focusing on undefined behavior and pointer misuse.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=makefile_sources.sh
-. "$SCRIPT_DIR/makefile_sources.sh"
 cd "$SCRIPT_DIR/../.."
 
-CLANG_TIDY=${CLANG_TIDY:-clang-tidy}
+RUN_CLANG_TIDY=${RUN_CLANG_TIDY:-run-clang-tidy}
 
-if ! command -v "$CLANG_TIDY" >/dev/null; then
-	echo "error: $CLANG_TIDY not found (apt install clang-tidy, or set CLANG_TIDY)" >&2
-	exit 2
-fi
+for tool in "$RUN_CLANG_TIDY" bear; do
+	if ! command -v "$tool" >/dev/null; then
+		echo "error: $tool not found (apt install clang-tidy bear)" >&2
+		exit 2
+	fi
+done
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
-
-# Stand-in for the autoconf-generated config.h.
-cat > "$TMP_DIR/config.h" <<EOF
-#define HAVE_STRUCT_TIMESPEC 1
-#define HAVE_CLOCK_GETTIME 1
-#define PACKAGE_VERSION "lint"
-EOF
 
 # Undefined behavior, pointer/memory misuse, and common C mistakes.
 CHECKS=(
 	-*
 	clang-analyzer-core.*
 	clang-analyzer-security.*
-	-clang-analyzer-security.insecureAPI.*
 	clang-analyzer-unix.*
 	clang-analyzer-optin.portability.UnixAPI
 	clang-analyzer-deadcode.DeadStores
-	bugprone-undefined-memory-manipulation
-	bugprone-sizeof-expression
-	bugprone-sizeof-container
-	bugprone-suspicious-memset-usage
-	bugprone-suspicious-memory-comparison
-	bugprone-suspicious-string-compare
-	bugprone-suspicious-realloc-usage
-	bugprone-not-null-terminated-result
-	# bugprone-multi-level-implicit-pointer-conversion
-	bugprone-implicit-widening-of-multiplication-result
-	# bugprone-narrowing-conversions
-	bugprone-signed-char-misuse
-	bugprone-integer-division
-	bugprone-misplaced-pointer-arithmetic-in-alloc
-	bugprone-posix-return
-	bugprone-unused-return-value
-	# bugprone-assignment-in-if-condition
-	# bugprone-macro-parentheses
-	bugprone-macro-repeated-side-effects
-	bugprone-incorrect-roundings
-	bugprone-bad-signal-to-kill-thread
-	bugprone-signal-handler
-	bugprone-spuriously-wake-up-functions
-	bugprone-terminating-continue
-	bugprone-too-small-loop-variable
-	bugprone-branch-clone
-	bugprone-redundant-branch-condition
-	bugprone-infinite-loop
-	# bugprone-reserved-identifier
-	# bugprone-switch-missing-default-case
+	bugprone-*
+	# These give a ton of warnings and are not critical for now
+	-clang-analyzer-security.insecureAPI.*
+	-bugprone-multi-level-implicit-pointer-conversion
+	-bugprone-narrowing-conversions
+	-bugprone-assignment-in-if-condition
+	-bugprone-macro-parentheses
+	-bugprone-reserved-identifier
+	-bugprone-switch-missing-default-case
+	-bugprone-easily-swappable-parameters
 )
 CHECKS_CSV=$(IFS=,; echo "${CHECKS[*]}")
 
-CFLAGS=(
-	-std=gnu11
-	-D_REENTRANT -D__LINUX__ -D_GNU_SOURCE
-	-DMSTPD_PID_FILE='"/var/run/mstpd.pid"'
-	-I. -I"$TMP_DIR"
-)
-read -r -a CJSON_CFLAGS <<<"$(pkg-config --cflags libcjson 2>/dev/null || true)"
-read -r -a MNL_CFLAGS <<<"$(pkg-config --cflags libmnl 2>/dev/null || true)"
-CFLAGS+=("${CJSON_CFLAGS[@]}" "${MNL_CFLAGS[@]}")
+echo "==> Recording compile commands"
+autoreconf -i
+SRC_DIR=$PWD
+(cd "$TMP_DIR" && "$SRC_DIR/configure" --quiet && bear -- make -j"$(nproc)" >/dev/null)
 
-mapfile -t FILES < <({ am_sources mstpd_SOURCES; am_sources mstpctl_SOURCES; } | sort -u)
-
-echo "==> clang-tidy on ${#FILES[@]} files"
+echo "==> clang-tidy"
 # Header filter limits diagnostics to this repo's own headers.
-"$CLANG_TIDY" \
-	--checks="$CHECKS_CSV" \
-	--header-filter="^$PWD/.*" \
-	"${FILES[@]}" -- "${CFLAGS[@]}"
+"$RUN_CLANG_TIDY" -quiet \
+	-use-color \
+	-p "$TMP_DIR" \
+	-checks="$CHECKS_CSV" \
+	-header-filter="^$PWD/.*"
 
 echo "==> Done"

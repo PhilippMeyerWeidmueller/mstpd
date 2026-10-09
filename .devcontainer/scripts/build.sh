@@ -6,8 +6,6 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=makefile_sources.sh
-. "$SCRIPT_DIR/makefile_sources.sh"
 cd "$SCRIPT_DIR/../.."
 
 BUILD_DIR=build
@@ -24,59 +22,32 @@ done
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
-# Stand-in for the autoconf-generated config.h.
-cat > "$BUILD_DIR/config.h" <<EOF
-#define HAVE_STRUCT_TIMESPEC 1
-#define HAVE_CLOCK_GETTIME 1
-#define PACKAGE_VERSION "dev-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-EOF
-
+# Appended after mstpd_CFLAGS from Makefile.am, so these take precedence.
 CFLAGS=(
-	-std=gnu11
-	-g3
-	-O2
-	-Wno-unused-parameter
-	-Wno-sign-compare
 	-Wall
 	-Wextra
 	-Wformat=2
 	-Wformat-security
-	-fstack-protector-strong
-	-D_FORTIFY_SOURCE=2
-	-D_REENTRANT
-	-D__LINUX__
-	-D_GNU_SOURCE
-	-DMSTPD_PID_FILE='"/var/run/mstpd.pid"'
-	-I.
-	-I"$BUILD_DIR"
+	# These gave lots of warnings but are not critical for now
+	# So I disabled them for now
+	-Wno-unused-parameter
+	-Wno-sign-compare
 )
 
-read -r -a CJSON_CFLAGS <<<"$(pkg-config --cflags libcjson)"
-read -r -a CJSON_LIBS <<<"$(pkg-config --libs libcjson)"
-read -r -a MNL_CFLAGS <<<"$(pkg-config --cflags libmnl)"
-read -r -a MNL_LIBS <<<"$(pkg-config --libs libmnl)"
-CFLAGS+=("${CJSON_CFLAGS[@]}" "${MNL_CFLAGS[@]}")
+echo "==> Configuring"
+autoreconf -i
+cd "$BUILD_DIR"
+../configure --quiet CC="$CC" CFLAGS="${CFLAGS[*]}"
 
-mapfile -t MSTPD_SRCS < <(am_sources mstpd_SOURCES)
-mapfile -t MSTPCTL_SRCS < <(am_sources mstpctl_SOURCES)
+# -s hides recipe echo, V=0 prints only "CC file.o"; warnings still go to stderr.
+MAKE=(make -s V=0 -j"$(nproc)")
 
-echo "==> Building mstpd"
-"$CC" "${CFLAGS[@]}" "${MSTPD_SRCS[@]}" -o "$BUILD_DIR/mstpd" "${CJSON_LIBS[@]}" "${MNL_LIBS[@]}" -lm -lrt
-
-echo "==> Building mstpctl"
-"$CC" "${CFLAGS[@]}" "${MSTPCTL_SRCS[@]}" -o "$BUILD_DIR/mstpctl" -lrt
+echo "==> Building mstpd, mstpctl"
+"${MAKE[@]}"
 
 if ((RUN_TESTS)); then
-	read -r -a CMOCKA_CFLAGS <<<"$(pkg-config --cflags cmocka)"
-	read -r -a CMOCKA_LIBS <<<"$(pkg-config --libs cmocka)"
-	for prog in $(am_var check_PROGRAMS); do
-		t=$(basename "$prog")
-		mapfile -t TEST_SRCS < <(am_sources "$(am_canon "$prog")_SOURCES")
-		echo "==> Building and running $t"
-		"$CC" "${CFLAGS[@]}" "${CMOCKA_CFLAGS[@]}" "${TEST_SRCS[@]}" \
-			-o "$BUILD_DIR/$t" "${CMOCKA_LIBS[@]}" -lrt
-		"$BUILD_DIR/$t"
-	done
+	echo "==> Building and running tests"
+	"${MAKE[@]}" check VERBOSE=1
 fi
 
 echo "==> Done: $BUILD_DIR/mstpd, $BUILD_DIR/mstpctl"

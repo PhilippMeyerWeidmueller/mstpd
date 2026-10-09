@@ -13,6 +13,7 @@ RUN apt-get update \
 		valgrind \
 		clang-format \
 		clang-tidy \
+		bear \
 		shellcheck \
 		libcjson-dev \
 		libmnl-dev \
