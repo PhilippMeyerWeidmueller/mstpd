@@ -156,6 +156,15 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    const char *cfg = persistent_config_resolve(config_path);
+    if(cfg)
+    {
+        if(0 != persistent_config_load(cfg))
+            return EXIT_FAILURE;
+    }
+    else
+        INFO("No configuration file found, using defaults");
+
     if(daemonize)
     {
         FILE *f = fopen(MSTPD_PID_FILE, "w");
@@ -180,14 +189,6 @@ int main(int argc, char *argv[])
     TST(ctl_socket_init() == 0, -1);
     TST(packet_sock_init() == 0, -1);
     TST(netsock_init() == 0, -1);
-
-    const char *cfg = persistent_config_resolve(config_path);
-    if(cfg) {
-        persistent_config_load(cfg);
-    }
-    else {
-        INFO("No configuration file found, using defaults");
-    }
 
     TST(init_bridge_ops() == 0, -1);
 

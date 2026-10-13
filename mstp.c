@@ -825,107 +825,65 @@ void MSTP_IN_get_msti_bridge_status(tree_t *tree, MSTI_BridgeStatus *status)
 }
 
 /* 12.8.1.3 Set CIST Bridge Protocol Parameters */
+
+const char *MSTP_IN_validate_cist_bridge_config(
+    const CIST_BridgeConfig *cfg, __u8 current_max_age,
+    __u8 current_forward_delay)
+{
+    __u8 max_age = cfg->set_bridge_max_age ? cfg->bridge_max_age
+                                           : current_max_age;
+    __u8 forward_delay = cfg->set_bridge_forward_delay
+                       ? cfg->bridge_forward_delay : current_forward_delay;
+
+    if(cfg->set_bridge_max_age && (max_age < 6 || max_age > 40))
+        return "Bridge Max Age must be between 6 and 40 seconds";
+    if(cfg->set_bridge_forward_delay
+       && (forward_delay < 4 || forward_delay > 30))
+        return "Bridge Forward Delay must be between 4 and 30 seconds";
+    if((cfg->set_bridge_max_age || cfg->set_bridge_forward_delay)
+       && 2 * (forward_delay - 1) < max_age)
+        return "Configured Bridge Times don't meet 2 * (Bridge Forward "
+               "Delay - 1 second) >= Bridge Max Age";
+
+    if(cfg->set_protocol_version
+       && cfg->protocol_version != protoSTP
+       && cfg->protocol_version != protoRSTP
+       && cfg->protocol_version != protoMSTP)
+        return "Bad protocol version";
+    if(cfg->set_tx_hold_count
+       && (cfg->tx_hold_count < 1 || cfg->tx_hold_count > 10))
+        return "Transmit Hold Count must be between 1 and 10 seconds";
+    if(cfg->set_max_hops && (cfg->max_hops < 6 || cfg->max_hops > 100))
+        return "Bridge Max Hops must be between 6 and 100";
+    if(cfg->set_bridge_hello_time && cfg->bridge_hello_time != 2)
+        return "Bridge Hello Time must be 2";
+    if(cfg->set_bridge_ageing_time
+       && (cfg->bridge_ageing_time < 10
+           || cfg->bridge_ageing_time > 1000000))
+        return "Bridge Ageing Time must be between 10 and 1000000 seconds";
+
+    return NULL;
+}
+
 int MSTP_IN_set_cist_bridge_config(bridge_t *br, CIST_BridgeConfig *cfg)
 {
     bool changed, changedBridgeTimes, init;
-    int r = 0;
     __u8 new_forward_delay, new_max_age;
     tree_t *tree;
     port_t *prt;
     per_tree_port_t *ptp;
+    const char *validation_error = MSTP_IN_validate_cist_bridge_config(
+        cfg, br->Max_Age, br->Forward_Delay);
 
-    /* Firstly, validation */
-    if(cfg->set_bridge_max_age)
+    if(validation_error)
     {
-        new_max_age = cfg->bridge_max_age;
-        if((6 > new_max_age) || (40 < new_max_age))
-        {
-            ERROR_BRNAME(br,
-                "Bridge Max Age must be between 6 and 40 seconds");
-            r = -1;
-        }
-    }
-    else
-        new_max_age = br->Max_Age;
-
-    if(cfg->set_bridge_forward_delay)
-    {
-        new_forward_delay = cfg->bridge_forward_delay;
-        if((4 > new_forward_delay) || (30 < new_forward_delay))
-        {
-            ERROR_BRNAME(br,
-                "Bridge Forward Delay must be between 4 and 30 seconds");
-            r = -1;
-        }
-    }
-    else
-        new_forward_delay = br->Forward_Delay;
-
-    if(cfg->set_bridge_max_age || cfg->set_bridge_forward_delay)
-    {
-        if((2 * (new_forward_delay - 1)) < new_max_age)
-        {
-            ERROR_BRNAME(br, "Configured Bridge Times don't meet "
-                "2 * (Bridge Forward Delay - 1 second) >= Bridge Max Age");
-            r = -1;
-        }
+        ERROR_BRNAME(br, "%s", validation_error);
+        return -1;
     }
 
-    if(cfg->set_protocol_version)
-    {
-        switch(cfg->protocol_version)
-        {
-            case protoSTP:
-            case protoRSTP:
-            case protoMSTP:
-                break;
-            default:
-                ERROR_BRNAME(br, "Bad protocol version (%d)",
-                             cfg->protocol_version);
-                r = -1;
-        }
-    }
-
-    if(cfg->set_tx_hold_count)
-    {
-        if((1 > cfg->tx_hold_count) || (10 < cfg->tx_hold_count))
-        {
-            ERROR_BRNAME(br,
-                "Transmit Hold Count must be between 1 and 10 seconds");
-            r = -1;
-        }
-    }
-
-    if(cfg->set_max_hops)
-    {
-        if((6 > cfg->max_hops) || (100 < cfg->max_hops))
-        {
-            ERROR_BRNAME(br, "Bridge Max Hops must be between 6 and 100");
-            r = -1;
-        }
-    }
-
-    if(cfg->set_bridge_hello_time)
-    {
-        if((2 != cfg->bridge_hello_time))
-        {
-            ERROR_BRNAME(br, "Bridge Hello Time must be 2");
-            r = -1;
-        }
-    }
-
-    if(cfg->set_bridge_ageing_time)
-    {
-        if((10 > cfg->bridge_ageing_time)||(1000000 < cfg->bridge_ageing_time))
-        {
-            ERROR_BRNAME(br,
-                "Bridge Ageing Time must be between 10 and 1000000 seconds");
-            r = -1;
-        }
-    }
-
-    if(r)
-        return r;
+    new_max_age = cfg->set_bridge_max_age ? cfg->bridge_max_age : br->Max_Age;
+    new_forward_delay = cfg->set_bridge_forward_delay
+                      ? cfg->bridge_forward_delay : br->Forward_Delay;
 
     /* Secondly, do set */
     changed = changedBridgeTimes = init = false;
@@ -1025,7 +983,7 @@ int MSTP_IN_set_msti_bridge_config(tree_t *tree, __u8 bridge_priority)
     per_tree_port_t *ptp;
     __u8 valuePri;
 
-    if(15 < bridge_priority)
+    if(!MSTP_IN_validate_priority(bridge_priority))
     {
         ERROR_BRNAME(tree->bridge,
                      "MSTI %hu: Bridge Priority must be between 0 and 15",
@@ -1125,35 +1083,33 @@ void MSTP_IN_get_msti_port_status(per_tree_port_t *ptp,
 }
 
 /* 12.8.2.3 Set CIST port parameters */
+
+const char *MSTP_IN_validate_cist_port_config(const CIST_PortConfig *cfg)
+{
+    if(cfg->set_admin_p2p
+       && cfg->admin_p2p != p2pAuto
+       && cfg->admin_p2p != p2pForceTrue
+       && cfg->admin_p2p != p2pForceFalse)
+        return "Invalid admin point-to-point mode";
+    if(cfg->set_admin_external_port_path_cost
+       && !MSTP_IN_validate_path_cost(cfg->admin_external_port_path_cost))
+        return "Port Path Cost must be between 0 and 200000000";
+
+    return NULL;
+}
+
 int MSTP_IN_set_cist_port_config(port_t *prt, CIST_PortConfig *cfg)
 {
     bool changed;
     __u32 new_ExternalPathCost;
     bool new_p2p;
     per_tree_port_t *cist;
+    const char *validation_error = MSTP_IN_validate_cist_port_config(cfg);
 
-    /* Firstly, validation */
-    if(cfg->set_admin_p2p)
+    if(validation_error)
     {
-        switch(cfg->admin_p2p)
-        {
-            case p2pAuto:
-            case p2pForceTrue:
-            case p2pForceFalse:
-                break;
-            default:
-                cfg->admin_p2p = p2pAuto;
-        }
-    }
-
-    if(cfg->set_admin_external_port_path_cost)
-    {
-        if(MAX_PATH_COST < cfg->admin_external_port_path_cost)
-        {
-            ERROR_PRTNAME(prt,
-                          "Port Path Cost must be between 0 and 200000000");
-            return -1;
-        }
+        ERROR_PRTNAME(prt, "%s", validation_error);
+        return -1;
     }
 
     /* Secondly, do set */
@@ -1289,6 +1245,18 @@ int MSTP_IN_set_cist_port_config(port_t *prt, CIST_PortConfig *cfg)
 }
 
 /* 12.8.2.4 Set MSTI port parameters */
+
+const char *MSTP_IN_validate_msti_port_config(const MSTI_PortConfig *cfg)
+{
+    if(cfg->set_port_priority && !MSTP_IN_validate_priority(cfg->port_priority))
+        return "Port Priority must be between 0 and 15";
+    if(cfg->set_admin_internal_port_path_cost
+       && !MSTP_IN_validate_path_cost(cfg->admin_internal_port_path_cost))
+        return "Port Path Cost must be between 0 and 200000000";
+
+    return NULL;
+}
+
 int MSTP_IN_set_msti_port_config(per_tree_port_t *ptp, MSTI_PortConfig *cfg)
 {
     __u8 valuePri;
@@ -1296,25 +1264,12 @@ int MSTP_IN_set_msti_port_config(per_tree_port_t *ptp, MSTI_PortConfig *cfg)
     bool changed = false;
     port_t *prt = ptp->port;
     bridge_t *br = prt->bridge;
+    const char *validation_error = MSTP_IN_validate_msti_port_config(cfg);
 
-    if(cfg->set_port_priority)
+    if(validation_error)
     {
-        if(15 < cfg->port_priority)
-        {
-            ERROR_MSTINAME(ptp,
-                           "Port Priority must be between 0 and 15");
-            return -1;
-        }
-    }
-
-    if(cfg->set_admin_internal_port_path_cost)
-    {
-        if (MAX_PATH_COST < cfg->admin_internal_port_path_cost)
-        {
-            ERROR_MSTINAME(ptp,
-                           "Port Path Cost must be between 0 and 200000000");
-            return -1;
-        }
+        ERROR_MSTINAME(ptp, "%s", validation_error);
+        return -1;
     }
 
     if(cfg->set_port_priority)
@@ -1373,7 +1328,7 @@ bool MSTP_IN_set_vid2fid(bridge_t *br, __u16 vid, __u16 fid)
 {
     bool vid2mstid_changed;
 
-    if((vid < 1) || (vid > MAX_VID) || (fid > MAX_FID))
+    if((vid < 1) || (vid > MAX_VID) || !MSTP_IN_validate_fid(fid))
     {
         ERROR_BRNAME(br, "Error allocating VID(%hu) to FID(%hu)", vid, fid);
         return false;
@@ -1392,19 +1347,45 @@ bool MSTP_IN_set_vid2fid(bridge_t *br, __u16 vid, __u16 fid)
 }
 
 /* Set all VID-to-FID mappings at once */
+
+bool MSTP_IN_validate_fid(__u16 fid)
+{
+    return fid <= MAX_FID;
+}
+
+bool MSTP_IN_validate_mstid(__u16 mstid)
+{
+    return mstid <= MAX_MSTID;
+}
+
+bool MSTP_IN_validate_priority(__u8 priority)
+{
+    return priority <= 15;
+}
+
+bool MSTP_IN_validate_path_cost(__u32 path_cost)
+{
+    return path_cost <= MAX_PATH_COST;
+}
+
 bool MSTP_IN_set_all_vids2fids(bridge_t *br, __u16 *vids2fids)
 {
     bool vid2mstid_changed;
     int vid;
 
+    for(vid = 1; vid <= MAX_VID; ++vid)
+    {
+        if(!MSTP_IN_validate_fid(vids2fids[vid]))
+        {
+            ERROR_BRNAME(br, "Error allocating VID(%d) to invalid FID(%hu)",
+                         vid, vids2fids[vid]);
+            return false;
+        }
+    }
+
     vid2mstid_changed = false;
     for(vid = 1; vid <= MAX_VID; ++vid)
     {
-        if(vids2fids[vid] > MAX_FID)
-        { /* Incorrect value == keep prev value */
-            vids2fids[vid] = br->vid2fid[vid];
-            continue;
-        }
         if(br->fid2mstid[vids2fids[vid]] != br->fid2mstid[br->vid2fid[vid]])
             vid2mstid_changed = true;
     }
@@ -1426,9 +1407,14 @@ bool MSTP_IN_set_fid2mstid(bridge_t *br, __u16 fid, __u16 mstid)
     bool found;
     int vid;
 
-    if(fid > MAX_FID)
+    if(!MSTP_IN_validate_fid(fid))
     {
         ERROR_BRNAME(br, "Bad FID(%hu)", fid);
+        return false;
+    }
+    if(!MSTP_IN_validate_mstid(mstid))
+    {
+        ERROR_BRNAME(br, "Bad MSTID(%hu)", mstid);
         return false;
     }
 
@@ -1477,12 +1463,13 @@ bool MSTP_IN_set_all_fids2mstids(bridge_t *br, __u16 *fids2mstids)
 
     for(fid = 0; fid <= MAX_FID; ++fid)
     {
-        if(fids2mstids[fid] > MAX_MSTID)
-        { /* Incorrect value == keep prev value */
-            fids2mstids[fid] = __be16_to_cpu(MSTID[fid] = br->fid2mstid[fid]);
+        if(!MSTP_IN_validate_mstid(fids2mstids[fid]))
+        {
+            ERROR_BRNAME(br, "Error allocating FID(%d) to invalid MSTID(%hu)",
+                         fid, fids2mstids[fid]);
+            return false;
         }
-        else
-            MSTID[fid] = __cpu_to_be16(fids2mstids[fid]);
+        MSTID[fid] = __cpu_to_be16(fids2mstids[fid]);
         found = false;
         FOREACH_TREE_IN_BRIDGE(tree, br)
         {

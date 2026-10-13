@@ -8,61 +8,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
-#include <math.h>
 #include <limits.h>
 #include <stdint.h>
-#include <asm/byteorder.h>
 
 #include <cjson/cJSON.h>
 
 #include "ctl_socket_server.h"
+#include "config_apply.h"
+#include "json_utils.h"
 #include "persistent_config.h"
 #include "log.h"
 #include "driver.h"
 
-static LIST_HEAD(bridge_configs);
-
-static void free_port_config(stored_port_cfg_t *port_cfg)
-{
-    stored_msti_port_cfg_t *msti_cfg, *tmp;
-
-    list_for_each_entry_safe(msti_cfg, tmp, &port_cfg->mstis, list)
-    {
-        list_del(&msti_cfg->list);
-        free(msti_cfg);
-    }
-    free(port_cfg);
-}
-
-static void free_bridge_config(stored_bridge_cfg_t *br_cfg)
-{
-    stored_msti_bridge_cfg_t *msti_cfg, *tmp_msti;
-    stored_port_cfg_t *port_cfg, *tmp_port;
-
-    list_for_each_entry_safe(msti_cfg, tmp_msti, &br_cfg->mstis, list)
-    {
-        list_del(&msti_cfg->list);
-        free(msti_cfg);
-    }
-    list_for_each_entry_safe(port_cfg, tmp_port, &br_cfg->ports, list)
-    {
-        list_del(&port_cfg->list);
-        free_port_config(port_cfg);
-    }
-    free(br_cfg);
-}
-
-static void free_config_list(struct list_head *list)
-{
-    stored_bridge_cfg_t *br_cfg, *tmp;
-
-    list_for_each_entry_safe(br_cfg, tmp, list, list)
-    {
-        list_del(&br_cfg->list);
-        free_bridge_config(br_cfg);
-    }
-}
-
+/** Log that an unset configuration field uses its default value.
+ * @param br_name Bridge interface name used in the log message.
+ * @param port_name Port interface name, or NULL for a bridge-level field.
+ * @param field Configuration field name to report.
+ */
 static void report_config_default(const char *br_name, const char *port_name,
                                   const char *field)
 {
@@ -74,92 +36,12 @@ static void report_config_default(const char *br_name, const char *port_name,
                     br_name, field);
 }
 
-typedef enum { FIELD_ABSENT, FIELD_VALID, FIELD_INVALID } field_result_t;
-
-static bool cjson_is_uint(cJSON *field)
-{
-    if(!cJSON_IsNumber(field))
-        return false;
-
-    double value = field->valuedouble;
-    double integer_part;
-    return isfinite(value) && value >= 0
-        && modf(value, &integer_part) == 0;
-}
-
-static field_result_t get_json_uint(cJSON *parent, const char *key,
-                                    unsigned int type_max,
-                                    unsigned int *out)
-{
-    cJSON *field = cJSON_GetObjectItemCaseSensitive(parent, key);
-    if(!field)
-        return FIELD_ABSENT;
-    if(!cjson_is_uint(field))
-        return FIELD_INVALID;
-
-    double value = field->valuedouble;
-    *out = value > type_max ? type_max : (unsigned int)value;
-    return FIELD_VALID;
-}
-
-static field_result_t get_json_protocol_version(cJSON *parent,
-                                                const char *key,
-                                                protocol_version_t *out)
-{
-    cJSON *field = cJSON_GetObjectItemCaseSensitive(parent, key);
-    if(!field)
-        return FIELD_ABSENT;
-    if(!cJSON_IsString(field))
-        return FIELD_INVALID;
-
-    const char *value = field->valuestring;
-    if(!strcmp(value, "stp"))
-        *out = protoSTP;
-    else if(!strcmp(value, "rstp"))
-        *out = protoRSTP;
-    else if(!strcmp(value, "mstp"))
-        *out = protoMSTP;
-    else
-        return FIELD_INVALID;
-
-    return FIELD_VALID;
-}
-
-static field_result_t get_json_bool(cJSON *parent, const char *key,
-                                    bool *out)
-{
-    cJSON *field = cJSON_GetObjectItemCaseSensitive(parent, key);
-    if(!field)
-        return FIELD_ABSENT;
-    if(!cJSON_IsBool(field))
-        return FIELD_INVALID;
-
-    *out = cJSON_IsTrue(field);
-    return FIELD_VALID;
-}
-
-static field_result_t get_json_admin_p2p(cJSON *parent, const char *key,
-                                         admin_p2p_t *out)
-{
-    cJSON *field = cJSON_GetObjectItemCaseSensitive(parent, key);
-    if(!field)
-        return FIELD_ABSENT;
-    if(!cJSON_IsString(field))
-        return FIELD_INVALID;
-
-    const char *value = field->valuestring;
-    if(!strcmp(value, "auto"))
-        *out = p2pAuto;
-    else if(!strcmp(value, "yes"))
-        *out = p2pForceTrue;
-    else if(!strcmp(value, "no"))
-        *out = p2pForceFalse;
-    else
-        return FIELD_INVALID;
-
-    return FIELD_VALID;
-}
-
+/** Parse CIST bridge settings into a stored bridge configuration.
+ * @param name Bridge interface name used in error messages.
+ * @param json JSON object containing the bridge settings.
+ * @param br_cfg Configuration object to populate.
+ * @return true if the settings are valid; otherwise false.
+ */
 static bool parse_cist_bridge_config(const char *name, cJSON *json,
                                      stored_bridge_cfg_t *br_cfg)
 {
@@ -187,6 +69,12 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
                   name);
             return false;
         case FIELD_VALID:
+            if(!MSTP_IN_validate_priority((__u8)u))
+            {
+                ERROR("Bridge '%s': 'bridge-priority' must be between 0 and 15",
+                      name);
+                return false;
+            }
             br_cfg->bridge_priority = u;
             br_cfg->set_bridge_priority = true;
             break;
@@ -273,53 +161,12 @@ static bool parse_cist_bridge_config(const char *name, cJSON *json,
     return true;
 }
 
-/* Sets array[idx] = value for every index in the range strings of
- * list_json ("N" or "N-M"), idx bounded to min_index..max_index */
-static bool parse_index_list(cJSON *list_json, unsigned int min_index,
-                             unsigned int max_index, unsigned int value,
-                             __u16 *array)
-{
-    if(!cJSON_IsArray(list_json))
-        return false;
-
-    cJSON *item;
-    cJSON_ArrayForEach(item, list_json)
-    {
-        if(!cJSON_IsString(item))
-            return false;
-
-        const char *s = item->valuestring;
-        char *end;
-        long first = strtol(s, &end, 10);
-        if(end == s || first < min_index || first > max_index)
-            return false;
-
-        long last = first;
-        if(*end == '-')
-        {
-            char *end2;
-            last = strtol(end + 1, &end2, 10);
-            if(end2 == end + 1 || *end2 != '\0'
-               || last < min_index || last > max_index)
-                return false;
-        }
-        else if(*end != '\0')
-            return false;
-
-        if(first > last)
-        {
-            long tmp = first;
-            first = last;
-            last = tmp;
-        }
-
-        long idx;
-        for(idx = first; idx <= last; ++idx)
-            array[idx] = (__u16)value;
-    }
-    return true;
-}
-
+/** Parse and store VID-to-FID mappings from an MSTP JSON object.
+ * @param name Bridge interface name used in error messages.
+ * @param mstp_json JSON object containing the MSTP settings.
+ * @param br_cfg Configuration object whose VID-to-FID table is populated.
+ * @return true if the mappings are valid or absent; otherwise false.
+ */
 static bool parse_vid2fid(const char *name, cJSON *mstp_json,
                           stored_bridge_cfg_t *br_cfg)
 {
@@ -341,6 +188,7 @@ static bool parse_vid2fid(const char *name, cJSON *mstp_json,
         unsigned int fid;
         if(!cJSON_IsObject(entry)
            || FIELD_VALID != get_json_uint(entry, "fid", UINT16_MAX, &fid)
+              || !MSTP_IN_validate_fid((__u16)fid)
            || !parse_index_list(cJSON_GetObjectItemCaseSensitive(entry, "vids"),
                                 1, MAX_VID, fid, br_cfg->vid2fid))
         {
@@ -353,6 +201,12 @@ static bool parse_vid2fid(const char *name, cJSON *mstp_json,
     return true;
 }
 
+/** Parse and store FID-to-MSTID mappings from an MSTP JSON object.
+ * @param name Bridge interface name used in error messages.
+ * @param mstp_json JSON object containing the MSTP settings.
+ * @param br_cfg Configuration object whose FID-to-MSTID table is populated.
+ * @return true if the mappings are valid or absent; otherwise false.
+ */
 static bool parse_fid2mstid(const char *name, cJSON *mstp_json,
                            stored_bridge_cfg_t *br_cfg)
 {
@@ -375,6 +229,7 @@ static bool parse_fid2mstid(const char *name, cJSON *mstp_json,
         if(!cJSON_IsObject(entry)
            || FIELD_VALID != get_json_uint(entry, "mstid", UINT16_MAX,
                                            &mstid)
+              || !MSTP_IN_validate_mstid((__u16)mstid)
            || !parse_index_list(cJSON_GetObjectItemCaseSensitive(entry, "fids"),
                                 0, MAX_FID, mstid, br_cfg->fid2mstid))
         {
@@ -387,6 +242,12 @@ static bool parse_fid2mstid(const char *name, cJSON *mstp_json,
     return true;
 }
 
+/** Parse and store the MST configuration identifier.
+ * @param name Bridge interface name used in error messages.
+ * @param mstp_json JSON object containing the MSTP settings.
+ * @param br_cfg Configuration object whose MST configuration identifier is set.
+ * @return true if the identifier is valid or absent; otherwise false.
+ */
 static bool parse_mst_config_id(const char *name, cJSON *mstp_json,
                                 stored_bridge_cfg_t *br_cfg)
 {
@@ -432,6 +293,12 @@ static bool parse_mst_config_id(const char *name, cJSON *mstp_json,
     return true;
 }
 
+/** Parse and store bridge MSTI settings from an MSTP JSON object.
+ * @param name Bridge interface name used in error messages.
+ * @param mstp_json JSON object containing the MSTP settings.
+ * @param br_cfg Configuration object whose MSTI list is populated.
+ * @return true if all MSTI settings are valid or absent; otherwise false.
+ */
 static bool parse_msti_list(const char *name, cJSON *mstp_json,
                             stored_bridge_cfg_t *br_cfg)
 {
@@ -471,7 +338,8 @@ static bool parse_msti_list(const char *name, cJSON *mstp_json,
         unsigned int priority = default_priority;
         if(!cJSON_IsObject(value)
             || FIELD_INVALID ==
-                get_json_uint(value, "bridge-priority", UINT8_MAX, &priority))
+                get_json_uint(value, "bridge-priority", UINT8_MAX, &priority)
+            || !MSTP_IN_validate_priority((__u8)priority))
         {
             ERROR("Bridge '%s': 'mstp.msti.%s' must be an object with an "
                 "optional non-negative integer 'bridge-priority'", name, key);
@@ -500,6 +368,12 @@ static bool parse_msti_list(const char *name, cJSON *mstp_json,
     return true;
 }
 
+/** Parse MSTP bridge settings and their nested configuration sections.
+ * @param name Bridge interface name used in error messages.
+ * @param json JSON object containing the bridge settings.
+ * @param br_cfg Configuration object to populate.
+ * @return true if the MSTP settings are valid; otherwise false.
+ */
 static bool parse_mstp_bridge_config(const char *name, cJSON *json,
                                     stored_bridge_cfg_t *br_cfg)
 {
@@ -540,6 +414,15 @@ static bool parse_mstp_bridge_config(const char *name, cJSON *json,
         && parse_msti_list(name, mstp_json, br_cfg);
 }
 
+/** Read an optional CIST boolean field and update its value and set flag.
+ * @param br_name Bridge interface name used in error messages.
+ * @param port_name Port interface name used in error messages.
+ * @param json JSON object containing the field.
+ * @param key Name of the boolean field to read.
+ * @param value_field Receives the parsed boolean when the field is present.
+ * @param set_field Set to true when the field is present and valid.
+ * @return true if the field is absent or valid; otherwise false.
+ */
 static bool set_cist_bool_field(const char *br_name, const char *port_name,
                                 cJSON *json, const char *key,
                                 bool *value_field, bool *set_field)
@@ -562,11 +445,19 @@ static bool set_cist_bool_field(const char *br_name, const char *port_name,
     return true;
 }
 
+/** Parse and validate CIST port settings from a JSON object.
+ * @param br_name Bridge interface name used in error messages.
+ * @param port_name Port interface name used in error messages.
+ * @param json JSON object containing the port settings.
+ * @param port_cfg Port configuration object to populate.
+ * @return true if the CIST settings are valid; otherwise false.
+ */
 static bool parse_cist_port_config(const char *br_name, const char *port_name,
                                    cJSON *json, stored_port_cfg_t *port_cfg)
 {
     CIST_PortConfig *cfg = &port_cfg->cist_cfg;
     unsigned int u;
+    const char *validation_error;
 
     switch(get_json_uint(json, "port-priority", UINT8_MAX, &u))
     {
@@ -575,6 +466,12 @@ static bool parse_cist_port_config(const char *br_name, const char *port_name,
                   "non-negative integer", br_name, port_name);
             return false;
         case FIELD_VALID:
+            if(!MSTP_IN_validate_priority((__u8)u))
+            {
+                ERROR("Bridge '%s' port '%s': 'port-priority' must be "
+                      "between 0 and 15", br_name, port_name);
+                return false;
+            }
             port_cfg->port_priority = u;
             port_cfg->set_port_priority = true;
             break;
@@ -615,29 +512,47 @@ static bool parse_cist_port_config(const char *br_name, const char *port_name,
             break;
     }
 
-    return set_cist_bool_field(br_name, port_name, json, "admin-edge-port",
-                               &cfg->admin_edge_port,
-                               &cfg->set_admin_edge_port)
-        && set_cist_bool_field(br_name, port_name, json, "auto-edge-port",
+    if(!set_cist_bool_field(br_name, port_name, json, "admin-edge-port",
+                            &cfg->admin_edge_port,
+                            &cfg->set_admin_edge_port)
+       || !set_cist_bool_field(br_name, port_name, json, "auto-edge-port",
                               &cfg->auto_edge_port, &cfg->set_auto_edge_port)
-        && set_cist_bool_field(br_name, port_name, json, "restricted-role",
+       || !set_cist_bool_field(br_name, port_name, json, "restricted-role",
                               &cfg->restricted_role,
                               &cfg->set_restricted_role)
-        && set_cist_bool_field(br_name, port_name, json, "restricted-TCN",
+       || !set_cist_bool_field(br_name, port_name, json, "restricted-TCN",
                               &cfg->restricted_tcn,
                               &cfg->set_restricted_tcn)
-        && set_cist_bool_field(br_name, port_name, json, "bpdu-guard-port",
+       || !set_cist_bool_field(br_name, port_name, json, "bpdu-guard-port",
                               &cfg->bpdu_guard_port,
                               &cfg->set_bpdu_guard_port)
-        && set_cist_bool_field(br_name, port_name, json, "bpdu-filter-port",
+       || !set_cist_bool_field(br_name, port_name, json, "bpdu-filter-port",
                               &cfg->bpdu_filter_port,
                               &cfg->set_bpdu_filter_port)
-        && set_cist_bool_field(br_name, port_name, json, "network-port",
+       || !set_cist_bool_field(br_name, port_name, json, "network-port",
                               &cfg->network_port, &cfg->set_network_port)
-        && set_cist_bool_field(br_name, port_name, json, "dont-txmt",
-                              &cfg->dont_txmt, &cfg->set_dont_txmt);
+       || !set_cist_bool_field(br_name, port_name, json, "dont-txmt",
+                              &cfg->dont_txmt, &cfg->set_dont_txmt))
+        return false;
+
+    validation_error = MSTP_IN_validate_cist_port_config(cfg);
+    if(validation_error)
+    {
+        ERROR("Bridge '%s' port '%s': invalid CIST configuration: %s",
+              br_name, port_name, validation_error);
+        return false;
+    }
+
+    return true;
 }
 
+/** Parse and store per-MSTI port settings from an MSTP JSON object.
+ * @param br_name Bridge interface name used in error messages.
+ * @param port_name Port interface name used in error messages.
+ * @param mstp_json JSON object containing the MSTP settings.
+ * @param port_cfg Port configuration whose MSTI list is populated.
+ * @return true if all MSTI settings are valid or absent; otherwise false.
+ */
 static bool parse_msti_port_list(const char *br_name, const char *port_name,
                                  cJSON *mstp_json,
                                  stored_port_cfg_t *port_cfg)
@@ -661,7 +576,7 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
         char *end;
         long mstid = strtol(key, &end, 10);
         if(*end != '\0' || mstid < 1 || mstid > MAX_IMPLEMENTATION_MSTIS
-           || !cJSON_IsObject(value))
+              || !cJSON_IsObject(value))
         {
             ERROR("Bridge '%s' port '%s': invalid 'mstp.msti' entry '%s'",
                   br_name, port_name, key);
@@ -679,6 +594,7 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
 
         unsigned int u;
         char field[64];
+        const char *validation_error;
         switch(get_json_uint(value, "port-priority", UINT8_MAX, &u))
         {
             case FIELD_INVALID:
@@ -718,12 +634,28 @@ static bool parse_msti_port_list(const char *br_name, const char *port_name,
                 break;
         }
 
+        validation_error = MSTP_IN_validate_msti_port_config(&msti_cfg->cfg);
+        if(validation_error)
+        {
+            ERROR("Bridge '%s' port '%s': invalid 'mstp.msti.%s' config: %s",
+                  br_name, port_name, key, validation_error);
+            free(msti_cfg);
+            return false;
+        }
+
         list_add_tail(&msti_cfg->list, &port_cfg->mstis);
     }
 
     return true;
 }
 
+/** Parse MSTP port settings and their nested MSTI configuration.
+ * @param br_name Bridge interface name used in error messages.
+ * @param port_name Port interface name used in error messages.
+ * @param json JSON object containing the port settings.
+ * @param port_cfg Port configuration object to populate.
+ * @return true if the MSTP settings are valid; otherwise false.
+ */
 static bool parse_mstp_port_config(const char *br_name, const char *port_name,
                                    cJSON *json, stored_port_cfg_t *port_cfg)
 {
@@ -751,6 +683,13 @@ static bool parse_mstp_port_config(const char *br_name, const char *port_name,
                   "non-negative integer", br_name, port_name);
             return false;
         case FIELD_VALID:
+            if(!MSTP_IN_validate_path_cost(u))
+            {
+                ERROR("Bridge '%s' port '%s': "
+                      "'mstp.cist-admin-internal-cost' must be at most %u",
+                      br_name, port_name, MAX_PATH_COST);
+                return false;
+            }
             port_cfg->cist_admin_internal_port_path_cost = u;
             port_cfg->set_cist_internal_port_path_cost = true;
             break;
@@ -760,11 +699,18 @@ static bool parse_mstp_port_config(const char *br_name, const char *port_name,
             break;
     }
 
-    return parse_msti_port_list(br_name, port_name, mstp_json, port_cfg);
+        return parse_msti_port_list(br_name, port_name, mstp_json, port_cfg);
 }
 
+/** Parse a port JSON object into a stored port configuration.
+ * @param br_name Bridge interface name used in error messages.
+ * @param name Port interface name and JSON object key.
+ * @param json JSON object containing the port settings.
+ * @param[out] out Receives the allocated port configuration on success.
+ * @return true if the port settings are valid; otherwise false.
+ */
 static bool parse_port_config(const char *br_name, const char *name,
-                              cJSON *json, stored_port_cfg_t **out)
+                                  cJSON *json, stored_port_cfg_t **out)
 {
     stored_port_cfg_t *port_cfg;
 
@@ -799,9 +745,9 @@ static bool parse_port_config(const char *br_name, const char *name,
     INIT_LIST_HEAD(&port_cfg->mstis);
 
     if(!parse_cist_port_config(br_name, name, json, port_cfg)
-       || !parse_mstp_port_config(br_name, name, json, port_cfg))
+         || !parse_mstp_port_config(br_name, name, json, port_cfg))
     {
-        free_port_config(port_cfg);
+        free_port_cfg(port_cfg);
         return false;
     }
 
@@ -809,6 +755,12 @@ static bool parse_port_config(const char *br_name, const char *name,
     return true;
 }
 
+/** Parse all port configurations in a bridge JSON object.
+ * @param br_name Bridge interface name used in error messages.
+ * @param json JSON object containing the bridge settings.
+ * @param br_cfg Bridge configuration whose port list is populated.
+ * @return true if all port configurations are valid or absent; otherwise false.
+ */
 static bool parse_ports(const char *br_name, cJSON *json,
                         stored_bridge_cfg_t *br_cfg)
 {
@@ -834,10 +786,17 @@ static bool parse_ports(const char *br_name, cJSON *json,
     return true;
 }
 
+/** Parse and validate a complete bridge JSON object.
+ * @param name Bridge interface name and JSON object key.
+ * @param json JSON object containing the bridge settings.
+ * @param[out] out Receives the allocated bridge configuration on success.
+ * @return true if the bridge configuration is valid; otherwise false.
+ */
 static bool parse_bridge_config(const char *name, cJSON *json,
                                 stored_bridge_cfg_t **out)
 {
     stored_bridge_cfg_t *br_cfg;
+    const char *validation_error;
 
     if(strlen(name) >= sizeof(br_cfg->name))
     {
@@ -881,7 +840,18 @@ static bool parse_bridge_config(const char *name, cJSON *json,
        || !parse_mstp_bridge_config(name, json, br_cfg)
        || !parse_ports(name, json, br_cfg))
     {
-        free_bridge_config(br_cfg);
+        free_bridge_cfg(br_cfg);
+        return false;
+    }
+
+    validation_error = MSTP_IN_validate_cist_bridge_config(
+        &br_cfg->cist_cfg, br_cfg->cist_cfg.bridge_max_age,
+        br_cfg->cist_cfg.bridge_forward_delay);
+    if(validation_error)
+    {
+        ERROR("Bridge '%s': invalid CIST configuration: %s", name,
+              validation_error);
+        free_bridge_cfg(br_cfg);
         return false;
     }
 
@@ -990,170 +960,15 @@ int persistent_config_load(const char *path)
 
     if(!ok)
     {
-        free_config_list(&new_configs);
+        free_configs(&new_configs);
         ERROR("Configuration file %s has errors, keeping previous "
               "configuration", path);
         return -1;
     }
 
-    free_config_list(&bridge_configs);
-    list_splice_init(&new_configs, &bridge_configs);
+    replace_configs(&new_configs);
 
     INFO("Loaded configuration from %s", path);
     return 0;
-}
-
-static stored_bridge_cfg_t *find_stored_bridge(const char *name)
-{
-    stored_bridge_cfg_t *br_cfg;
-
-    list_for_each_entry(br_cfg, &bridge_configs, list)
-        if(!strcmp(br_cfg->name, name))
-            return br_cfg;
-    return NULL;
-}
-
-static stored_port_cfg_t *find_stored_port(stored_bridge_cfg_t *br_cfg,
-                                           const char *name)
-{
-    stored_port_cfg_t *port_cfg;
-
-    list_for_each_entry(port_cfg, &br_cfg->ports, list)
-        if(!strcmp(port_cfg->name, name))
-            return port_cfg;
-    return NULL;
-}
-
-static tree_t *find_tree(bridge_t *br, __u16 mstid)
-{
-    tree_t *tree;
-    __be16 wanted = __cpu_to_be16(mstid);
-
-    list_for_each_entry(tree, &br->trees, bridge_list)
-        if(tree->MSTID == wanted)
-            return tree;
-    return NULL;
-}
-
-static per_tree_port_t *find_ptp(port_t *prt, __u16 mstid)
-{
-    per_tree_port_t *ptp;
-    __be16 wanted = __cpu_to_be16(mstid);
-
-    list_for_each_entry(ptp, &prt->trees, port_list)
-        if(ptp->MSTID == wanted)
-            return ptp;
-    return NULL;
-}
-
-void persistent_config_apply_to_bridge(bridge_t *br)
-{
-    stored_bridge_cfg_t *br_cfg = find_stored_bridge(br->sysdeps.name);
-    if(!br_cfg)
-        return;
-
-    if(0 != MSTP_IN_set_cist_bridge_config(br, &br_cfg->cist_cfg))
-        ERROR_BRNAME(br, "Couldn't apply stored bridge configuration");
-
-    if(br_cfg->set_bridge_priority
-       && 0 != MSTP_IN_set_msti_bridge_config(GET_CIST_TREE(br),
-                                              br_cfg->bridge_priority))
-        ERROR_BRNAME(br, "Couldn't apply stored bridge priority");
-
-    if(br_cfg->set_mst_config_id)
-        MSTP_IN_set_mst_config_id(br, br_cfg->mst_config_id_revision,
-                                  br_cfg->mst_config_id_name);
-    else
-    {
-        MSTP_BridgeDefaultConfig *defaults = malloc(sizeof(*defaults));
-        if(!defaults)
-        {
-            ERROR_BRNAME(br, "Out of memory");
-            return;
-        }
-        MSTP_IN_get_bridge_default_config(defaults, br->sysdeps.macaddr);
-        MSTP_IN_set_mst_config_id(br, defaults->mst_config_id_revision,
-                                  defaults->mst_config_id_name);
-        free(defaults);
-    }
-
-    if(br_cfg->set_vid2fid && !MSTP_IN_set_all_vids2fids(br, br_cfg->vid2fid))
-        ERROR_BRNAME(br, "Couldn't apply stored vid2fid table");
-
-    stored_msti_bridge_cfg_t *msti_cfg;
-    list_for_each_entry(msti_cfg, &br_cfg->mstis, list)
-    {
-        tree_t *tree = find_tree(br, msti_cfg->mstid);
-        if(!tree)
-        {
-            if(!driver_create_msti(br, msti_cfg->mstid)
-               || !MSTP_IN_create_msti(br, msti_cfg->mstid))
-            {
-                ERROR_BRNAME(br, "Couldn't create stored MSTI %hu",
-                             msti_cfg->mstid);
-                continue;
-            }
-            tree = find_tree(br, msti_cfg->mstid);
-        }
-        if(tree && 0 != MSTP_IN_set_msti_bridge_config(
-                       tree, msti_cfg->bridge_priority))
-            ERROR_BRNAME(br, "Couldn't apply stored priority for MSTI %hu",
-                        msti_cfg->mstid);
-    }
-
-    if(br_cfg->set_fid2mstid
-       && !MSTP_IN_set_all_fids2mstids(br, br_cfg->fid2mstid))
-        ERROR_BRNAME(br, "Couldn't apply stored fid2mstid table");
-}
-
-void persistent_config_apply_to_port(port_t *prt)
-{
-    stored_bridge_cfg_t *br_cfg =
-        find_stored_bridge(prt->bridge->sysdeps.name);
-    if(!br_cfg)
-        return;
-
-    stored_port_cfg_t *port_cfg = find_stored_port(br_cfg,
-                                                   prt->sysdeps.name);
-    if(!port_cfg)
-        return;
-
-    if(0 != MSTP_IN_set_cist_port_config(prt, &port_cfg->cist_cfg))
-        ERROR_PRTNAME(prt, "Couldn't apply stored port configuration");
-
-    if(port_cfg->set_port_priority || port_cfg->set_cist_internal_port_path_cost)
-    {
-        MSTI_PortConfig cfg = { 0 };
-        if(port_cfg->set_port_priority)
-        {
-            cfg.port_priority = port_cfg->port_priority;
-            cfg.set_port_priority = true;
-        }
-        if(port_cfg->set_cist_internal_port_path_cost)
-        {
-            cfg.admin_internal_port_path_cost =
-                port_cfg->cist_admin_internal_port_path_cost;
-            cfg.set_admin_internal_port_path_cost = true;
-        }
-        if(0 != MSTP_IN_set_msti_port_config(GET_CIST_PTP_FROM_PORT(prt),
-                                             &cfg))
-            ERROR_PRTNAME(prt, "Couldn't apply stored CIST port priority/"
-                         "cost");
-    }
-
-    stored_msti_port_cfg_t *msti_cfg;
-    list_for_each_entry(msti_cfg, &port_cfg->mstis, list)
-    {
-        per_tree_port_t *ptp = find_ptp(prt, msti_cfg->mstid);
-        if(!ptp)
-        {
-            ERROR_PRTNAME(prt, "Stored MSTI %hu doesn't exist on this "
-                         "bridge", msti_cfg->mstid);
-            continue;
-        }
-        if(0 != MSTP_IN_set_msti_port_config(ptp, &msti_cfg->cfg))
-            ERROR_PRTNAME(prt, "Couldn't apply stored port configuration "
-                         "for MSTI %hu", msti_cfg->mstid);
-    }
 }
 
