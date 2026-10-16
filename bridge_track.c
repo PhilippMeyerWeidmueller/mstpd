@@ -23,6 +23,7 @@
 #include "log.h"
 #include "mstp.h"
 #include "driver.h"
+#include "config_apply.h"
 #include "persistent_config.h"
 
 #ifndef SYSFS_CLASS_NET

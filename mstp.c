@@ -4231,6 +4231,15 @@ static bool PRTSM_runr(per_tree_port_t *ptp, bool recursive_call, bool dry_run)
         MaxAge = cist->designatedTimes.Max_Age;
     }
 
+    /* The static vars above are only set by the initial non-recursive call.
+     * A recursive call without a preceding initial call would use them
+     * uninitialized, so refuse to run the state machine in that case. */
+    if(!prt || !tree || !cist)
+    {
+        ERROR("PRTSM entered recursively without initial call");
+        return false;
+    }
+
     PRTSM_LOG("role = %d, selectedRole = %d, selected = %d, updtInfo = %d",
               ptp->role, ptp->selectedRole, ptp->selected, ptp->updtInfo);
     if((ptp->role != ptp->selectedRole) && ptp->selected && !ptp->updtInfo)

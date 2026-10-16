@@ -30,17 +30,4 @@ const char *persistent_config_resolve(const char *path);
  */
 int persistent_config_load(const char *path);
 
-/** Apply stored configuration to one bridge.
- * @param br Bridge receiving the currently stored configuration.
- * @return Nothing; does nothing when no configuration exists for the bridge.
- */
-void persistent_config_apply_to_bridge(bridge_t *br);
-
-/** Apply stored configuration to one port.
- * @param prt Port receiving the currently stored configuration.
- * @return Nothing; does nothing when no configuration exists for its bridge
- *         or port name.
- */
-void persistent_config_apply_to_port(port_t *prt);
-
 #endif /* PERSISTENT_CONFIG_H */
