@@ -56,7 +56,7 @@ tests_test_persistent_config_SOURCES = $(TEST_COMMON) tests/test_persistent_conf
 	persistent_config.c persistent_config.h json_utils.c json_utils.h \
 	config_apply.c config_apply.h driver_deps.c driver.h ctl_socket_server.h
 tests_test_persistent_config_CPPFLAGS = $(AM_CPPFLAGS) \
-	-DDEFAULT_CONFIG_FILE='"$(abs_srcdir)/tests/config/default.json"'
+	-DEXAMPLE_CONFIG_FILE='"$(abs_srcdir)/tests/config/example-config.json"'
 tests_test_persistent_config_CFLAGS = $(CMOCKA_CFLAGS) $(mstpd_CFLAGS)
 tests_test_persistent_config_LDADD = $(CMOCKA_LIBS) $(CJSON_LIBS) -lm
 
@@ -68,7 +68,7 @@ tests_test_json_utils_LDADD = $(CMOCKA_LIBS) $(CJSON_LIBS) -lm
 EXTRA_DIST = bridge-stp.in utils/ifupdown.sh.in utils/mstp_config_bridge.in \
 	utils/mstpd.service.in utils/bash_completion utils/nm-dispatcher.in \
 	README.md README.VLANs.md mstpd.spec autogen.sh \
-	tests/config/default.json
+	tests/config/example-config.json
 
 CLEANFILES = bridge-stp utils/ifupdown.sh utils/mstp_config_bridge \
 	utils/mstpd.service utils/nm-dispatcher
