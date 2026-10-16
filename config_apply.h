@@ -63,7 +63,7 @@ void free_bridge_cfg(stored_bridge_cfg_t *br_cfg);
 
 /** Free all bridge configurations linked from a list head.
  * @param list List head containing stored_bridge_cfg_t entries,
- * which will be freed.
+ * which will be freed. The list head is left initialized and empty.
  */
 void free_configs(struct list_head *list);
 

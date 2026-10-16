@@ -6,6 +6,7 @@
 #include <asm/byteorder.h>
 
 #include "common.h"
+#include "config_apply.h"
 #include "persistent_config.h"
 
 #ifndef DEFAULT_CONFIG_FILE
@@ -199,6 +200,67 @@ static void missing_required_objects_are_rejected(void **state)
         "{\"bridges\":{\"br0\":{\"ports\":{\"eth0\":null}}}}"), 0);
 }
 
+static void free_configs_leaves_reusable_empty_list(void **state)
+{
+    (void)state;
+    LIST_HEAD(configs);
+
+    for(int count = 0; count <= 3; ++count)
+    {
+        for(int i = 0; i < count; ++i)
+        {
+            stored_bridge_cfg_t *br_cfg = calloc(1, sizeof(*br_cfg));
+            assert_non_null(br_cfg);
+            INIT_LIST_HEAD(&br_cfg->mstis);
+            INIT_LIST_HEAD(&br_cfg->ports);
+            list_add_tail(&br_cfg->list, &configs);
+        }
+
+        free_configs(&configs);
+        assert_ptr_equal(configs.next, &configs);
+        assert_ptr_equal(configs.prev, &configs);
+        free_configs(&configs);
+    }
+}
+
+static void replacing_configs_discards_old_entries(void **state)
+{
+    bridge_t *br, *removed;
+    CIST_BridgeStatus status;
+
+    assert_int_equal(load_json_string(
+        "{\"bridges\":{\"br0\":{\"force-protocol-version\":\"stp\"},"
+        "\"removed\":{\"force-protocol-version\":\"stp\"}}}"), 0);
+    assert_int_equal(alloc_bridge_ports(state, &br, "br0",
+                                        0x200000000001, NULL, 0), 0);
+    assert_int_equal(alloc_bridge_ports(state, &removed, "removed",
+                                        0x200000000002, NULL, 0), 0);
+    MSTP_IN_get_cist_bridge_status(removed, &status);
+    protocol_version_t initial_version = status.protocol_version;
+
+    persistent_config_apply_to_bridge(br);
+    MSTP_IN_get_cist_bridge_status(br, &status);
+    assert_int_equal(status.protocol_version, protoSTP);
+
+    assert_int_equal(load_json_string(
+        "{\"bridges\":{\"br0\":{\"force-protocol-version\":\"rstp\"}}}"), 0);
+    persistent_config_apply_to_bridge(br);
+    MSTP_IN_get_cist_bridge_status(br, &status);
+    assert_int_equal(status.protocol_version, protoRSTP);
+    persistent_config_apply_to_bridge(removed);
+    MSTP_IN_get_cist_bridge_status(removed, &status);
+    assert_int_equal(status.protocol_version, initial_version);
+
+    assert_int_equal(load_json_string("{\"bridges\":{}}"), 0);
+    assert_int_equal(load_json_string("{\"bridges\":{}}"), 0);
+    assert_int_equal(load_json_string(
+        "{\"bridges\":{\"br0\":{\"force-protocol-version\":\"stp\"}}}"), 0);
+    persistent_config_apply_to_bridge(br);
+    MSTP_IN_get_cist_bridge_status(br, &status);
+    assert_int_equal(status.protocol_version, protoSTP);
+    assert_int_equal(load_json_string("{\"bridges\":{}}"), 0);
+}
+
 /** Verify out-of-range bridge, port, FID, and MSTID values are rejected.
  * @param state CMocka test state; unused by this test.
  */
@@ -252,6 +314,9 @@ static void out_of_range_bridge_and_port_values_are_rejected(void **state)
 int main(int argc, char *argv[])
 {
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test(free_configs_leaves_reusable_empty_list),
+        cmocka_unit_test_setup_teardown(replacing_configs_discards_old_entries,
+                                        prepare_test, teardown_test),
         cmocka_unit_test_setup_teardown(default_json_config, prepare_test,
                                         teardown_test),
         cmocka_unit_test_setup_teardown(apply_skips_unconfigured_bridge,

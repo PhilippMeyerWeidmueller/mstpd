@@ -45,10 +45,8 @@ void free_configs(struct list_head *list)
     stored_bridge_cfg_t *br_cfg, *tmp;
 
     list_for_each_entry_safe(br_cfg, tmp, list, list)
-    {
-        list_del(&br_cfg->list);
         free_bridge_cfg(br_cfg);
-    }
+    INIT_LIST_HEAD(list);
 }
 
 void replace_configs(struct list_head *new_configs)
